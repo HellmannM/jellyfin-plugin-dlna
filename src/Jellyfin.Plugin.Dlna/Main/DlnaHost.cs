@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net;
@@ -6,6 +7,7 @@ using System.Net.Http;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text;
 using Jellyfin.Plugin.Dlna.Configuration;
 using Jellyfin.Plugin.Dlna.Model;
 using Jellyfin.Plugin.Dlna.PlayTo;
@@ -53,6 +55,13 @@ public sealed class DlnaHost : IHostedService, IDisposable
     private SsdpDevicePublisher? _publisher;
     private PlayToManager? _manager;
     private bool _disposed;
+    private readonly object _manualDiscoveryLock = new();
+    private CancellationTokenSource? _manualDiscoveryCancellation;
+    private Task? _manualDiscoveryTask;
+    private TimeSpan _manualDiscoveryInterval = TimeSpan.FromSeconds(60);
+    private IReadOnlyList<IPEndPoint> _manualDiscoveryTargets = Array.Empty<IPEndPoint>();
+    private static readonly char[] ManualAddressSeparators = [',', ';', '\r', '\n'];
+    private static readonly byte[] ManualDiscoveryPayload = BuildManualDiscoveryPayload();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DlnaHost"/> class.
@@ -140,6 +149,7 @@ public sealed class DlnaHost : IHostedService, IDisposable
         if (!_disposed)
         {
             Stop();
+            StopManualDiscoveryLoop();
             _disposed = true;
         }
     }
@@ -166,6 +176,41 @@ public sealed class DlnaHost : IHostedService, IDisposable
         {
             DisposePlayToManager();
         }
+
+        ConfigureManualDiscovery(options);
+    }
+
+    private void ConfigureManualDiscovery(DlnaPluginConfiguration options)
+    {
+        var endpoints = ParseManualDiscoveryTargets(options.ManualDeviceAddresses).ToArray();
+        if (endpoints.Length == 0)
+        {
+            StopManualDiscoveryLoop();
+            return;
+        }
+
+        CancellationTokenSource? previousCancellation;
+        Task? previousTask;
+
+        lock (_manualDiscoveryLock)
+        {
+            previousCancellation = _manualDiscoveryCancellation;
+            previousTask = _manualDiscoveryTask;
+
+            _manualDiscoveryTargets = endpoints;
+            _manualDiscoveryInterval = TimeSpan.FromSeconds(Math.Max(1, options.ClientDiscoveryIntervalSeconds));
+
+            _logger.LogInformation(
+                "Manual SSDP discovery enabled for {Count} endpoint(s): {Targets}",
+                endpoints.Length,
+                string.Join(", ", endpoints.Select(p => p.ToString())));
+
+            var cancellation = new CancellationTokenSource();
+            _manualDiscoveryCancellation = cancellation;
+            _manualDiscoveryTask = ManualDiscoveryLoopAsync(cancellation.Token);
+        }
+
+        DisposeManualDiscoveryResources(previousCancellation, previousTask);
     }
 
     private static string CreateUuid(string text)
@@ -176,6 +221,216 @@ public sealed class DlnaHost : IHostedService, IDisposable
         }
 
         return guid.ToString("D", CultureInfo.InvariantCulture);
+    }
+
+    private async Task ManualDiscoveryLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await SendManualDiscoveryCycleAsync(cancellationToken).ConfigureAwait(false);
+                await Task.Delay(_manualDiscoveryInterval, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manual SSDP discovery loop terminated unexpectedly.");
+        }
+    }
+
+    private async Task SendManualDiscoveryCycleAsync(CancellationToken cancellationToken)
+    {
+        var endpoints = _manualDiscoveryTargets;
+        if (endpoints.Count == 0 || _communicationsServer is null)
+        {
+            return;
+        }
+
+        var localAddresses = GetManualDiscoveryLocalAddresses();
+        if (localAddresses.Count == 0)
+        {
+            _logger.LogDebug("Skipping manual SSDP discovery because no IPv4 source addresses are available.");
+            return;
+        }
+
+        foreach (var endpoint in endpoints)
+        {
+            try
+            {
+                var sendTasks = localAddresses
+                    .Select(address => _communicationsServer.SendMessage(ManualDiscoveryPayload, endpoint, address, cancellationToken))
+                    .ToArray();
+
+                if (sendTasks.Length == 0)
+                {
+                    continue;
+                }
+
+                await Task.WhenAll(sendTasks).ConfigureAwait(false);
+                _logger.LogDebug("Manual SSDP discovery request sent to {Endpoint} using {Count} interface(s).", endpoint, localAddresses.Count);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to send manual SSDP discovery to {Endpoint}.", endpoint);
+            }
+        }
+    }
+
+    private IEnumerable<IPEndPoint> ParseManualDiscoveryTargets(string? rawValue)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            yield break;
+        }
+
+        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var segments = rawValue.Split(ManualAddressSeparators, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var segment in segments)
+        {
+            var trimmed = segment.Trim();
+            if (trimmed.Length == 0)
+            {
+                continue;
+            }
+
+            if (TryParseManualEndpoint(trimmed, out var endpoint) && endpoint is not null)
+            {
+                var key = endpoint.ToString();
+                if (unique.Add(key))
+                {
+                    yield return endpoint;
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Ignoring invalid manual DLNA discovery target '{ManualTarget}'.", trimmed);
+            }
+        }
+    }
+
+    private static bool TryParseManualEndpoint(string value, out IPEndPoint? endpoint)
+    {
+        if (IPEndPoint.TryParse(value, out var parsed))
+        {
+            endpoint = parsed;
+            return true;
+        }
+
+        if (IPAddress.TryParse(value, out var address))
+        {
+            endpoint = new IPEndPoint(address, SsdpConstants.MulticastPort);
+            return true;
+        }
+
+        endpoint = null;
+        return false;
+    }
+
+    private List<IPAddress> GetManualDiscoveryLocalAddresses()
+    {
+        var addresses = _networkManager.GetInternalBindAddresses()
+            .Where(x => x.Address is not null)
+            .Where(x => x.AddressFamily == AddressFamily.InterNetwork)
+            .Where(x => !x.Address!.Equals(IPAddress.Loopback))
+            .Select(x => x.Address!)
+            .Distinct()
+            .ToList();
+
+        if (addresses.Count == 0)
+        {
+            addresses = _networkManager.GetLoopbacks()
+                .Select(x => x.Address)
+                .Where(x => x is not null)
+                .Select(x => x!)
+                .Distinct()
+                .ToList();
+        }
+
+        return addresses;
+    }
+
+    private void StopManualDiscoveryLoop()
+    {
+        CancellationTokenSource? cancellation;
+        Task? task;
+
+        lock (_manualDiscoveryLock)
+        {
+            cancellation = _manualDiscoveryCancellation;
+            task = _manualDiscoveryTask;
+            _manualDiscoveryCancellation = null;
+            _manualDiscoveryTask = null;
+            _manualDiscoveryTargets = Array.Empty<IPEndPoint>();
+        }
+
+        DisposeManualDiscoveryResources(cancellation, task);
+    }
+
+    private void DisposeManualDiscoveryResources(CancellationTokenSource? cancellation, Task? task)
+    {
+        if (cancellation is not null)
+        {
+            try
+            {
+                cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
+        if (task is not null)
+        {
+            _ = task.ContinueWith(
+                t =>
+                {
+                    if (t.IsFaulted && t.Exception is not null)
+                    {
+                        _logger.LogWarning(t.Exception, "Manual SSDP discovery loop ended with an error.");
+                    }
+
+                    t.Dispose();
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        cancellation?.Dispose();
+    }
+
+    private static byte[] BuildManualDiscoveryPayload()
+    {
+        var builder = new StringBuilder();
+        var userAgent = string.Format(
+            CultureInfo.InvariantCulture,
+            "{0}/{1} UPnP/1.0 JellyfinDLNA/1.0",
+            Environment.OSVersion.Platform,
+            Environment.OSVersion.Version);
+
+        builder.Append("M-SEARCH * HTTP/1.1\r\n");
+        builder.AppendFormat(
+            CultureInfo.InvariantCulture,
+            "HOST: {0}:{1}\r\n",
+            SsdpConstants.MulticastLocalAdminAddress,
+            SsdpConstants.MulticastPort);
+        builder.Append("MAN: \"ssdp:discover\"\r\n");
+        builder.Append("MX: 3\r\n");
+        builder.Append("ST: ssdp:all\r\n");
+        builder.AppendFormat(CultureInfo.InvariantCulture, "USER-AGENT: {0}\r\n", userAgent);
+        builder.Append("\r\n");
+
+        return Encoding.UTF8.GetBytes(builder.ToString());
     }
 
     private static void SetProperties(SsdpDevice device, string fullDeviceType)
@@ -378,6 +633,7 @@ public sealed class DlnaHost : IHostedService, IDisposable
 
     private void Stop()
     {
+        StopManualDiscoveryLoop();
         DisposeDevicePublisher();
         DisposePlayToManager();
     }

@@ -38,4 +38,10 @@ public class DlnaPluginConfiguration : BasePluginConfiguration
     /// Gets or sets the default user account that the dlna server uses.
     /// </summary>
     public Guid? DefaultUserId { get; set; }
+
+    /// <summary>
+    /// Gets or sets optional manual device addresses for direct SSDP discovery.
+    /// Multiple addresses can be separated by commas or new lines. Port defaults to 1900 when omitted.
+    /// </summary>
+    public string ManualDeviceAddresses { get; set; } = string.Empty;
 }

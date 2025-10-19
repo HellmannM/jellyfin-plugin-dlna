@@ -51,6 +51,13 @@
                             </label>
                         </div>
 
+                        <div class="inputContainer">
+                            <input is="emby-input" type="text" id="dlnaManualDeviceAddresses" label="Manual Device IPs (optional):" />
+                            <div class="fieldDescription">
+                                Optional comma or newline separated IPv4 addresses. Jellyfin will send SSDP discovery requests directly to these hosts in addition to broadcasting.
+                            </div>
+                        </div>
+
                         <div class="selectContainer">
                             <select is="emby-select" id="dlnaSelectUser" label="Default User:"></select>
                         </div>

@@ -78,7 +78,6 @@ public sealed class DeviceDiscovery : IDeviceDiscovery, IDisposable
         {
             if (_listenerCount > 0 && _deviceLocator is null && _commsServer is not null)
             {
-                _logger.LogDebug("Starting SSDP device locator with {ListenerCount} listener(s).", _listenerCount);
                 _deviceLocator = new SsdpDeviceLocator(
                     _commsServer,
                     Environment.OSVersion.Platform.ToString(),
@@ -108,19 +107,9 @@ public sealed class DeviceDiscovery : IDeviceDiscovery, IDisposable
     {
         var originalHeaders = e.DiscoveredDevice.ResponseHeaders;
 
-        _logger.LogDebug(
-            "Received SSDP response from {Remote} with location {Location}.",
-            e.RemoteIPAddress,
-            e.DiscoveredDevice.DescriptionLocation);
-
         var headerDict = originalHeaders is null ? [] : originalHeaders.ToDictionary(i => i.Key, StringComparer.OrdinalIgnoreCase);
 
         var headers = headerDict.ToDictionary(i => i.Key, i => i.Value.Value.FirstOrDefault(), StringComparer.OrdinalIgnoreCase);
-
-        if (!headers.TryGetValue("USN", out var usn) || string.IsNullOrWhiteSpace(usn))
-        {
-            _logger.LogDebug("Discovered device at {Remote} does not include a USN header.", e.RemoteIPAddress);
-        }
 
         var args = new GenericEventArgs<UpnpDeviceInfo>(
             new UpnpDeviceInfo
@@ -131,10 +120,6 @@ public sealed class DeviceDiscovery : IDeviceDiscovery, IDisposable
             });
 
         DeviceDiscoveredInternal?.Invoke(this, args);
-        if (DeviceDiscoveredInternal is null)
-        {
-            _logger.LogDebug("No subscribers handled the SSDP response from {Remote}.", e.RemoteIPAddress);
-        }
     }
 
     private void OnDeviceLocatorDeviceUnavailable(object sender, DeviceUnavailableEventArgs e)
@@ -152,7 +137,6 @@ public sealed class DeviceDiscovery : IDeviceDiscovery, IDisposable
                 Headers = headers
             });
 
-        _logger.LogDebug("SSDP device at {Location} became unavailable.", e.DiscoveredDevice.DescriptionLocation);
         DeviceLeft?.Invoke(this, args);
     }
 

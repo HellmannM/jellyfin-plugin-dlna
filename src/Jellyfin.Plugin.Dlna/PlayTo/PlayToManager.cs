@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
@@ -39,6 +40,8 @@ public sealed class PlayToManager : IDisposable
     private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly SemaphoreSlim _sessionLock = new(1, 1);
+    private readonly HashSet<string> _knownDeviceIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _knownDevicesLock = new();
     private readonly CancellationTokenSource _disposeCancellationTokenSource = new();
     private bool _disposed;
 
@@ -104,11 +107,6 @@ public sealed class PlayToManager : IDisposable
         }
 
         var info = e.Argument;
-        _logger.LogDebug(
-            "Processing SSDP response from {Remote} with location {Location}.",
-            info.RemoteIPAddress,
-            info.Location);
-
         if (!info.Headers.TryGetValue("USN", out string? usn))
         {
             usn = string.Empty;
@@ -123,14 +121,6 @@ public sealed class PlayToManager : IDisposable
         var advertisesRenderer = usn.Contains("MediaRenderer:", StringComparison.OrdinalIgnoreCase)
             || nt.Contains("MediaRenderer:", StringComparison.OrdinalIgnoreCase);
 
-        if (!advertisesRenderer)
-        {
-            _logger.LogDebug(
-                "SSDP device {Usn} at {Remote} does not advertise MediaRenderer; inspecting description for embedded renderer.",
-                usn,
-                info.RemoteIPAddress);
-        }
-
         var cancellationToken = _disposeCancellationTokenSource.Token;
 
         await _sessionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -142,18 +132,23 @@ public sealed class PlayToManager : IDisposable
                 return;
             }
 
-            if (SessionExists(usn, info.Location))
+            if (!TryReserveDeviceKeys(usn, info.Location, out var reservedKeys))
             {
-                _logger.LogDebug("Skipping SSDP device {Usn} at {Remote} because a session already exists.", usn, info.RemoteIPAddress);
                 return;
             }
 
-            _logger.LogDebug("Attempting to add PlayTo device {Usn} from {Remote}.", usn, info.RemoteIPAddress);
-            await AddDevice(info, advertisesRenderer, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await AddDevice(info, advertisesRenderer, reservedKeys, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                ReleaseDeviceKeys(reservedKeys);
+                throw;
+            }
         }
         catch (OperationCanceledException)
         {
-            _logger.LogDebug("PlayTo device discovery for {Usn} cancelled.", usn);
         }
         catch (Exception ex)
         {
@@ -165,20 +160,92 @@ public sealed class PlayToManager : IDisposable
         }
     }
 
-    private bool SessionExists(string usn, Uri location)
+    private bool TryReserveDeviceKeys(string usn, Uri location, out string[] reservedKeys)
     {
-        var existing = _sessionManager.Sessions.FirstOrDefault(i => usn.Contains(i.DeviceId, StringComparison.OrdinalIgnoreCase));
-        if (existing is not null)
+        var keys = GetDeviceKeys(usn, location).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (keys.Length == 0)
         {
-            return true;
+            reservedKeys = Array.Empty<string>();
+            return false;
         }
 
-        var locationString = location.OriginalString;
-        existing = _sessionManager.Sessions.FirstOrDefault(i =>
-            string.Equals(i.Client, "DLNA", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(i.DeviceId, locationString.GetMD5().ToString("N", CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase));
+        if (HasExistingSession(usn, keys))
+        {
+            lock (_knownDevicesLock)
+            {
+                foreach (var key in keys)
+                {
+                    _knownDeviceIds.Add(key);
+                }
+            }
 
-        return existing is not null;
+            reservedKeys = Array.Empty<string>();
+            return false;
+        }
+
+        lock (_knownDevicesLock)
+        {
+            if (keys.Any(_knownDeviceIds.Contains))
+            {
+                reservedKeys = Array.Empty<string>();
+                return false;
+            }
+
+            foreach (var key in keys)
+            {
+                _knownDeviceIds.Add(key);
+            }
+        }
+
+        reservedKeys = keys;
+        return true;
+    }
+
+    private bool HasExistingSession(string usn, string[] keys)
+    {
+        foreach (var session in _sessionManager.Sessions)
+        {
+            if (!string.IsNullOrWhiteSpace(usn) && usn.Contains(session.DeviceId, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (keys.Any(key => string.Equals(session.DeviceId, key, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> GetDeviceKeys(string usn, Uri location)
+    {
+        if (!string.IsNullOrWhiteSpace(usn))
+        {
+            yield return GetUuid(usn);
+        }
+
+        if (location is not null)
+        {
+            yield return location.OriginalString.GetMD5().ToString("N", CultureInfo.InvariantCulture);
+        }
+    }
+
+    private void ReleaseDeviceKeys(ReadOnlySpan<string> keys)
+    {
+        if (keys.IsEmpty)
+        {
+            return;
+        }
+
+        lock (_knownDevicesLock)
+        {
+            foreach (var key in keys)
+            {
+                _knownDeviceIds.Remove(key);
+            }
+        }
     }
 
     internal static string GetUuid(string usn)
@@ -213,10 +280,9 @@ public sealed class PlayToManager : IDisposable
         return tmp.ToString();
     }
 
-    private async Task AddDevice(UpnpDeviceInfo info, bool advertisesRenderer, CancellationToken cancellationToken)
+    private async Task AddDevice(UpnpDeviceInfo info, bool advertisesRenderer, string[] reservedKeys, CancellationToken cancellationToken)
     {
         var uri = info.Location;
-        _logger.LogDebug("Attempting to create PlayToController from location {0}", uri);
 
         if (info.Headers.TryGetValue("USN", out string? uuid))
         {
@@ -239,18 +305,15 @@ public sealed class PlayToManager : IDisposable
             if (device is null)
             {
                 _logger.LogError("Ignoring device as xml response is invalid.");
+                ReleaseDeviceKeys(reservedKeys);
                 return;
             }
 
             if (!HasMediaRendererServices(device))
             {
-                _logger.LogDebug("Ignoring device at {Location} because description does not expose required MediaRenderer services.", uri);
                 device.Dispose();
+                ReleaseDeviceKeys(reservedKeys);
                 return;
-            }
-            else if (!advertisesRenderer)
-            {
-                _logger.LogDebug("Device at {Location} contains an embedded MediaRenderer despite not advertising it.", uri);
             }
 
             string deviceName = device.Properties.Name;
@@ -329,6 +392,11 @@ public sealed class PlayToManager : IDisposable
 
         _sessionLock.Dispose();
         _disposeCancellationTokenSource.Dispose();
+
+        lock (_knownDevicesLock)
+        {
+            _knownDeviceIds.Clear();
+        }
 
         _disposed = true;
     }

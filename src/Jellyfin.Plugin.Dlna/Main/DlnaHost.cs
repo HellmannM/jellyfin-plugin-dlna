@@ -323,6 +323,11 @@ public sealed class DlnaHost : IHostedService, IDisposable
         if (IPEndPoint.TryParse(value, out var parsed))
         {
             endpoint = parsed;
+            if (endpoint.Port == 0)
+            {
+                endpoint = new IPEndPoint(endpoint.Address, SsdpConstants.MulticastPort);
+            }
+
             return true;
         }
 

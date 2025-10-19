@@ -39,17 +39,18 @@ const DlnaConfigurationPage = {
             const defaults = DlnaConfigurationPage;
             ApiClient.getPluginConfiguration(this.pluginUniqueId)
                 .then((config) => {
-                    config.EnablePlayTo = page.querySelector('#dlnaPlayTo').checked;
-                    config.ClientDiscoveryIntervalSeconds = parseInt(page.querySelector('#dlnaDiscoveryInterval').value, 10) || defaults.defaultDiscoveryInterval;
-                    config.BlastAliveMessages = page.querySelector('#dlnaBlastAlive').checked;
-                    config.AliveMessageIntervalSeconds = parseInt(page.querySelector('#dlnaAliveInterval').value, 10) || defaults.defaultAliveInterval;
-                    config.SendOnlyMatchedHost = page.querySelector('#dlnaMatchedHost').checked;
-                    config.ManualDeviceAddresses = (page.querySelector('#dlnaManualDeviceAddresses').value || '').trim();
+                    const updatedConfig = Object.assign({}, config);
+                    updatedConfig.EnablePlayTo = page.querySelector('#dlnaPlayTo').checked;
+                    updatedConfig.ClientDiscoveryIntervalSeconds = parseInt(page.querySelector('#dlnaDiscoveryInterval').value, 10) || defaults.defaultDiscoveryInterval;
+                    updatedConfig.BlastAliveMessages = page.querySelector('#dlnaBlastAlive').checked;
+                    updatedConfig.AliveMessageIntervalSeconds = parseInt(page.querySelector('#dlnaAliveInterval').value, 10) || defaults.defaultAliveInterval;
+                    updatedConfig.SendOnlyMatchedHost = page.querySelector('#dlnaMatchedHost').checked;
+                    updatedConfig.ManualDeviceAddresses = (page.querySelector('#dlnaManualDeviceAddresses').value || '').trim();
 
                     const selectedUser = page.querySelector('#dlnaSelectUser').value;
-                    config.DefaultUserId = selectedUser.length > 0 ? selectedUser : null;
+                    updatedConfig.DefaultUserId = selectedUser.length > 0 ? selectedUser : null;
 
-                    ApiClient.updatePluginConfiguration(DlnaConfigurationPage.pluginUniqueId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+                    ApiClient.updatePluginConfiguration(DlnaConfigurationPage.pluginUniqueId, updatedConfig).then(Dashboard.processPluginConfigurationUpdateResult);
                 });
         });
     }

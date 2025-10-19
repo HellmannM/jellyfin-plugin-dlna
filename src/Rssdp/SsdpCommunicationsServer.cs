@@ -241,6 +241,7 @@ namespace Rssdp.Infrastructure
                 .Where(x => x.AddressFamily == AddressFamily.InterNetwork)
                 .Where(x => x.SupportsMulticast)
                 .Where(x => !x.Address.Equals(IPAddress.Loopback))
+                .Where(x => IsPreferredSubnet(x.Address!))
                 .ToList();
 
             return iplist;
@@ -395,6 +396,17 @@ namespace Rssdp.Infrastructure
             }
 
             return sockets;
+        }
+
+        private static bool IsPreferredSubnet(IPAddress address)
+        {
+            if (address.AddressFamily != AddressFamily.InterNetwork)
+            {
+                return false;
+            }
+
+            var bytes = address.GetAddressBytes();
+            return bytes.Length > 0 && bytes[0] == 192;
         }
 
         private async Task ListenToSocketInternal(Socket socket, IPData listenIP)

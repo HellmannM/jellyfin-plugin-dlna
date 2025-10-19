@@ -341,6 +341,17 @@ public sealed class DlnaHost : IHostedService, IDisposable
         return false;
     }
 
+    private static bool IsPreferredBroadcastAddress(IPAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+        return bytes.Length > 0 && bytes[0] == 192;
+    }
+
     private List<IPAddress> GetManualDiscoveryLocalAddresses()
     {
         var addresses = _networkManager.GetInternalBindAddresses()
@@ -348,6 +359,7 @@ public sealed class DlnaHost : IHostedService, IDisposable
             .Where(x => x.AddressFamily == AddressFamily.InterNetwork)
             .Where(x => !x.Address!.Equals(IPAddress.Loopback))
             .Select(x => x.Address!)
+            .Where(IsPreferredBroadcastAddress)
             .Distinct()
             .ToList();
 
@@ -357,6 +369,7 @@ public sealed class DlnaHost : IHostedService, IDisposable
                 .Select(x => x.Address)
                 .Where(x => x is not null)
                 .Select(x => x!)
+                .Where(IsPreferredBroadcastAddress)
                 .Distinct()
                 .ToList();
         }
@@ -510,6 +523,7 @@ public sealed class DlnaHost : IHostedService, IDisposable
             .Where(x => x.AddressFamily == AddressFamily.InterNetwork)
             .Where(x => x.SupportsMulticast)
             .Where(x => !x.Address.Equals(IPAddress.Loopback))
+            .Where(x => IsPreferredBroadcastAddress(x.Address!))
             .ToList();
 
         var httpBindPort = _appHost.HttpPort;

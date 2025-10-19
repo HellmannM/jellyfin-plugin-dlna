@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Events;
+using Jellyfin.Plugin.Dlna.Common;
 using Jellyfin.Plugin.Dlna.Model;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller;
@@ -103,6 +104,10 @@ public sealed class PlayToManager : IDisposable
         }
 
         var info = e.Argument;
+        _logger.LogDebug(
+            "Processing SSDP response from {Remote} with location {Location}.",
+            info.RemoteIPAddress,
+            info.Location);
 
         if (!info.Headers.TryGetValue("USN", out string? usn))
         {
@@ -115,10 +120,15 @@ public sealed class PlayToManager : IDisposable
         }
 
         // It has to report that it's a media renderer
-        if (!usn.Contains("MediaRenderer:", StringComparison.OrdinalIgnoreCase)
-            && !nt.Contains("MediaRenderer:", StringComparison.OrdinalIgnoreCase))
+        var advertisesRenderer = usn.Contains("MediaRenderer:", StringComparison.OrdinalIgnoreCase)
+            || nt.Contains("MediaRenderer:", StringComparison.OrdinalIgnoreCase);
+
+        if (!advertisesRenderer)
         {
-            return;
+            _logger.LogDebug(
+                "SSDP device {Usn} at {Remote} does not advertise MediaRenderer; inspecting description for embedded renderer.",
+                usn,
+                info.RemoteIPAddress);
         }
 
         var cancellationToken = _disposeCancellationTokenSource.Token;
@@ -132,15 +142,18 @@ public sealed class PlayToManager : IDisposable
                 return;
             }
 
-            if (_sessionManager.Sessions.Any(i => usn.Contains(i.DeviceId, StringComparison.OrdinalIgnoreCase)))
+            if (SessionExists(usn, info.Location))
             {
+                _logger.LogDebug("Skipping SSDP device {Usn} at {Remote} because a session already exists.", usn, info.RemoteIPAddress);
                 return;
             }
 
-            await AddDevice(info, cancellationToken).ConfigureAwait(false);
+            _logger.LogDebug("Attempting to add PlayTo device {Usn} from {Remote}.", usn, info.RemoteIPAddress);
+            await AddDevice(info, advertisesRenderer, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
+            _logger.LogDebug("PlayTo device discovery for {Usn} cancelled.", usn);
         }
         catch (Exception ex)
         {
@@ -150,6 +163,22 @@ public sealed class PlayToManager : IDisposable
         {
             _sessionLock.Release();
         }
+    }
+
+    private bool SessionExists(string usn, Uri location)
+    {
+        var existing = _sessionManager.Sessions.FirstOrDefault(i => usn.Contains(i.DeviceId, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+        {
+            return true;
+        }
+
+        var locationString = location.OriginalString;
+        existing = _sessionManager.Sessions.FirstOrDefault(i =>
+            string.Equals(i.Client, "DLNA", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(i.DeviceId, locationString.GetMD5().ToString("N", CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase));
+
+        return existing is not null;
     }
 
     internal static string GetUuid(string usn)
@@ -184,7 +213,7 @@ public sealed class PlayToManager : IDisposable
         return tmp.ToString();
     }
 
-    private async Task AddDevice(UpnpDeviceInfo info, CancellationToken cancellationToken)
+    private async Task AddDevice(UpnpDeviceInfo info, bool advertisesRenderer, CancellationToken cancellationToken)
     {
         var uri = info.Location;
         _logger.LogDebug("Attempting to create PlayToController from location {0}", uri);
@@ -211,6 +240,17 @@ public sealed class PlayToManager : IDisposable
             {
                 _logger.LogError("Ignoring device as xml response is invalid.");
                 return;
+            }
+
+            if (!HasMediaRendererServices(device))
+            {
+                _logger.LogDebug("Ignoring device at {Location} because description does not expose required MediaRenderer services.", uri);
+                device.Dispose();
+                return;
+            }
+            else if (!advertisesRenderer)
+            {
+                _logger.LogDebug("Device at {Location} contains an embedded MediaRenderer despite not advertising it.", uri);
             }
 
             string deviceName = device.Properties.Name;
@@ -263,6 +303,14 @@ public sealed class PlayToManager : IDisposable
 
             _logger.LogInformation("DLNA Session created for {0} - {1} using profile {2}", device.Properties.Name, device.Properties.ModelName, profile.Name);
         }
+    }
+
+    private static bool HasMediaRendererServices(Device device)
+    {
+        var services = device.Properties.Services ?? Array.Empty<DeviceService>();
+        bool hasAvTransport = services.Any(s => s.ServiceType.Contains("AVTransport", StringComparison.OrdinalIgnoreCase));
+        bool hasRenderingControl = services.Any(s => s.ServiceType.Contains("RenderingControl", StringComparison.OrdinalIgnoreCase));
+        return hasAvTransport && hasRenderingControl;
     }
 
     /// <inheritdoc />

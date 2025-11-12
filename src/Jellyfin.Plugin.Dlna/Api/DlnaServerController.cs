@@ -3,6 +3,7 @@ using System.ComponentModel.DataAnnotations;
 using System.IO;
 using System.Net.Mime;
 using System.Threading.Tasks;
+using System.Web;
 using Jellyfin.Extensions;
 using Jellyfin.Plugin.Dlna.Model;
 using MediaBrowser.Common.Api;
@@ -194,10 +195,10 @@ public class DlnaServerController : ControllerBase
     [ApiExplorerSettings(IgnoreApi = true)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
-    [Produces(MediaTypeNames.Text.Xml)]
-    public ActionResult<EventSubscriptionResponse> ProcessMediaReceiverRegistrarEventRequest(string serverId)
+    public ActionResult ProcessMediaReceiverRegistrarEventRequest(string serverId)
     {
-        return ProcessEventRequest(_mediaReceiverRegistrar);
+        SetResponse(ProcessEventRequest(_mediaReceiverRegistrar));
+        return new EmptyResult();
     }
 
     /// <summary>
@@ -212,10 +213,10 @@ public class DlnaServerController : ControllerBase
     [ApiExplorerSettings(IgnoreApi = true)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
-    [Produces(MediaTypeNames.Text.Xml)]
-    public ActionResult<EventSubscriptionResponse> ProcessContentDirectoryEventRequest(string serverId)
+    public ActionResult ProcessContentDirectoryEventRequest(string serverId)
     {
-        return ProcessEventRequest(_contentDirectory);
+        SetResponse(ProcessEventRequest(_contentDirectory));
+        return new EmptyResult();
     }
 
     /// <summary>
@@ -230,10 +231,10 @@ public class DlnaServerController : ControllerBase
     [ApiExplorerSettings(IgnoreApi = true)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
-    [Produces(MediaTypeNames.Text.Xml)]
-    public ActionResult<EventSubscriptionResponse> ProcessConnectionManagerEventRequest(string serverId)
+    public ActionResult ProcessConnectionManagerEventRequest(string serverId)
     {
-        return ProcessEventRequest(_connectionManager);
+        SetResponse(ProcessEventRequest(_connectionManager));
+        return new EmptyResult();
     }
 
     /// <summary>
@@ -324,5 +325,15 @@ public class DlnaServerController : ControllerBase
         }
 
         return dlnaEventManager.CancelEventSubscription(subscriptionId);
+    }
+
+    private void SetResponse(EventSubscriptionResponse eventSubscriptionResponse)
+    {
+        Response.Headers.Server = HttpUtility.UrlEncode(_dlnaManager.GetServerName());
+        Response.ContentLength = 0;
+        foreach (var header in eventSubscriptionResponse.Headers)
+        {
+            Response.Headers[header.Key] = HttpUtility.UrlEncode(header.Value);
+        }
     }
 }

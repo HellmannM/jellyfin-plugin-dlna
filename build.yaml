@@ -1,9 +1,9 @@
 name: "DLNA"
 guid: "33EBA9CD-7DA1-4720-967F-DD7DAE7B74A1"
 imageUrl: ""
-version: 8
-targetAbi: "10.10.6.0"
-framework: "net8.0"
+version: 10
+targetAbi: "10.11.0.0"
+framework: "net9.0"
 owner: "jellyfin"
 overview: "DLNA Service"
 description: >
@@ -16,4 +16,5 @@ artifacts:
   - "Jellyfin.Plugin.Dlna.Playback.dll"
   - "Rssdp.dll"
 changelog: |-
-  - Revert collection expression (#132) @crobibero
+  - Encode header values (#174) @crobibero
+  - Avoid invalid PlayCommand start index (#175) @crobibero
